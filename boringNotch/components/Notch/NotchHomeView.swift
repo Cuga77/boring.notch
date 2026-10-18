@@ -140,6 +140,15 @@ struct MusicControlsView: View {
         .onReceive(Timer.publish(every: 3, on: .main, in: .common).autoconnect()) { _ in
             musicManager.refreshAudioSources()
         }
+        .horizontalSwipe { direction in
+            guard musicManager.audioSources.count > 1 else { return }
+            musicManager.switchAudioSource(by: direction == .left ? 1 : -1)
+        }
+    }
+
+    /// Room kept free next to the title for the source arrows
+    private var switcherReservedWidth: CGFloat {
+        musicManager.audioSources.count > 1 ? 68 : 0
     }
 
     /// Arrows to cycle between browser tabs that play audio
@@ -193,7 +202,7 @@ struct MusicControlsView: View {
             MarqueeText(
                 otherSource.map { .constant($0.displayTitle) } ?? $musicManager.songTitle,
                 font: .headline, nsFont: .headline, textColor: .white,
-                frameWidth: width)
+                frameWidth: max(width - switcherReservedWidth, 0))
             MarqueeText(
                 otherSource.map { .constant($0.host) } ?? $musicManager.artistName,
                 font: .headline,

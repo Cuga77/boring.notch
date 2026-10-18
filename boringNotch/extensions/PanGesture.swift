@@ -34,6 +34,33 @@ extension View {
     }
 }
 
+extension View {
+    /// Two-finger horizontal trackpad swipe, reported once per gesture. Scroll events only, so clicks
+    /// and drags on the view keep working.
+    func horizontalSwipe(threshold: CGFloat = 30, action: @escaping (PanDirection) -> Void) -> some View {
+        modifier(HorizontalSwipeModifier(threshold: threshold, action: action))
+    }
+}
+
+private struct HorizontalSwipeModifier: ViewModifier {
+    let threshold: CGFloat
+    let action: (PanDirection) -> Void
+    // Momentum scrolling can start a second gesture right after the first one
+    @State private var lastSwipe: Date = .distantPast
+
+    func body(content: Content) -> some View {
+        content
+            .background(ScrollMonitor(direction: .left, threshold: threshold) { _, phase in fire(.left, phase) })
+            .background(ScrollMonitor(direction: .right, threshold: threshold) { _, phase in fire(.right, phase) })
+    }
+
+    private func fire(_ direction: PanDirection, _ phase: NSEvent.Phase) {
+        guard phase == .began, Date().timeIntervalSince(lastSwipe) > 0.6 else { return }
+        lastSwipe = Date()
+        action(direction)
+    }
+}
+
 private struct ScrollMonitor: NSViewRepresentable {
     let direction: PanDirection
     let threshold: CGFloat
