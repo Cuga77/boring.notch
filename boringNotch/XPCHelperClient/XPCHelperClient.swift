@@ -241,6 +241,55 @@ final class XPCHelperClient: NSObject {
             return false
         }
     }
+
+    // MARK: - Browser Tabs
+
+    nonisolated func activateBrowserTab(bundleIdentifier: String, title: String, raise: Bool = true) async -> Bool {
+        do {
+            let service = await MainActor.run {
+                ensureRemoteService()
+            }
+            return try await service.withContinuation { service, continuation in
+                service.activateBrowserTab(bundleIdentifier, matching: title, raise: raise) { success in
+                    continuation.resume(returning: success)
+                }
+            }
+        } catch {
+            return false
+        }
+    }
+
+    /// Browser tabs playing audio as JSON `[{"title", "host", "icon"}]`
+    nonisolated func listAudioTabs(bundleIdentifier: String) async -> Data {
+        do {
+            let service = await MainActor.run {
+                ensureRemoteService()
+            }
+            return try await service.withContinuation { service, continuation in
+                service.listAudioTabs(bundleIdentifier) { json in
+                    continuation.resume(returning: json)
+                }
+            }
+        } catch {
+            return Data("[]".utf8)
+        }
+    }
+
+    /// 1 paused, 0 resumed, -1 no player found in the tab
+    nonisolated func toggleBrowserTabPlayback(bundleIdentifier: String, title: String) async -> Int {
+        do {
+            let service = await MainActor.run {
+                ensureRemoteService()
+            }
+            return try await service.withContinuation { service, continuation in
+                service.toggleBrowserTabPlayback(bundleIdentifier, matching: title) { result in
+                    continuation.resume(returning: result)
+                }
+            }
+        } catch {
+            return -1
+        }
+    }
 }
 
 extension Notification.Name {

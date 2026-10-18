@@ -20,5 +20,9 @@ import Foundation
     func isScreenBrightnessAvailable(with reply: @escaping (Bool) -> Void)
     func currentScreenBrightness(with reply: @escaping (NSNumber?) -> Void)
     func setScreenBrightness(_ value: Float, with reply: @escaping (Bool) -> Void)
+    // Browser tabs via Accessibility (performed by the helper)
+    func activateBrowserTab(_ bundleIdentifier: String, matching title: String, raise: Bool, with reply: @escaping (Bool) -> Void)
+    func listAudioTabs(_ bundleIdentifier: String, with reply: @escaping (Data) -> Void)
+    func toggleBrowserTabPlayback(_ bundleIdentifier: String, matching title: String, with reply: @escaping (Int) -> Void)
 }
 

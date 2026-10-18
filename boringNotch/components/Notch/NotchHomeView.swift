@@ -52,7 +52,7 @@ struct AlbumArtView: View {
             .scaleEffect(x: 1.3, y: 1.4)
             .rotationEffect(.degrees(92))
             .blur(radius: 40)
-            .opacity(musicManager.isPlaying ? 0.5 : 0)
+            .opacity(musicManager.displayIsPlaying ? 0.5 : 0)
     }
 
     private var albumArtButton: some View {
@@ -66,7 +66,7 @@ struct AlbumArtView: View {
                 }
             }
             .buttonStyle(PlainButtonStyle())
-            .scaleEffect(musicManager.isPlaying ? 1 : 0.85)
+            .scaleEffect(musicManager.displayIsPlaying ? 1 : 0.85)
             
             albumArtDarkOverlay
         }
@@ -76,13 +76,18 @@ struct AlbumArtView: View {
         Rectangle()
             .aspectRatio(1, contentMode: .fit)
             .foregroundColor(Color.black)
-            .opacity(musicManager.isPlaying ? 0 : 0.8)
+            .opacity(musicManager.displayIsPlaying ? 0 : 0.8)
             .blur(radius: 50)
     }
                 
 
+    /// Album art, or the site icon when the island follows a tab the browser doesn't report as Now Playing
+    private var shownArtwork: NSImage {
+        musicManager.isShowingOtherSource ? (musicManager.currentAudioSource?.icon ?? musicManager.albumArt) : musicManager.albumArt
+    }
+
     private var albumArtImage: some View {
-        Image(nsImage: musicManager.albumArt)
+        Image(nsImage: shownArtwork)
             .resizable()
             .aspectRatio(1, contentMode: .fit)
             .matchedGeometryEffect(id: "albumArt", in: albumArtNamespace)
@@ -97,14 +102,19 @@ struct AlbumArtView: View {
 
     @ViewBuilder
     private var appIconOverlay: some View {
-        if vm.notchState == .open && !musicManager.usingAppIconForArtwork {
-            AppIcon(for: musicManager.bundleIdentifier ?? "com.apple.Music")
-                .resizable()
-                .aspectRatio(contentMode: .fill)
-                .frame(width: 30, height: 30)
-                .offset(x: 10, y: 10)
-                .transition(.scale.combined(with: .opacity))
-                .zIndex(2)
+        if vm.notchState == .open && !musicManager.usingAppIconForArtwork && !musicManager.isShowingOtherSource {
+            Group {
+                if let siteIcon = musicManager.currentAudioSource?.icon {
+                    Image(nsImage: siteIcon).resizable()
+                } else {
+                    AppIcon(for: musicManager.bundleIdentifier ?? "com.apple.Music").resizable()
+                }
+            }
+            .aspectRatio(contentMode: .fill)
+            .frame(width: 30, height: 30)
+            .offset(x: 10, y: 10)
+            .transition(.scale.combined(with: .opacity))
+            .zIndex(2)
         }
     }
 }
@@ -122,29 +132,70 @@ struct MusicControlsView: View {
     var body: some View {
         VStack(alignment: .leading) {
             songInfoAndSlider
+                .overlay(alignment: .topTrailing) { audioSourceSwitcher }
             slotToolbar
         }
         .buttonStyle(PlainButtonStyle())
+        .onAppear { musicManager.refreshAudioSources() }
+        .onReceive(Timer.publish(every: 3, on: .main, in: .common).autoconnect()) { _ in
+            musicManager.refreshAudioSources()
+        }
+    }
+
+    /// Arrows to cycle between browser tabs that play audio
+    @ViewBuilder
+    private var audioSourceSwitcher: some View {
+        if musicManager.audioSources.count > 1 {
+            HStack(spacing: 4) {
+                Button {
+                    musicManager.switchAudioSource(by: -1)
+                } label: {
+                    Image(systemName: "chevron.left")
+                }
+                Text("\((musicManager.audioSourceIndex ?? 0) + 1)/\(musicManager.audioSources.count)")
+                    .monospacedDigit()
+                Button {
+                    musicManager.switchAudioSource(by: 1)
+                } label: {
+                    Image(systemName: "chevron.right")
+                }
+            }
+            .font(.caption2.weight(.semibold))
+            .foregroundStyle(.gray)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2)
+            .background(Capsule().fill(Color.white.opacity(0.1)))
+            .help(musicManager.currentAudioSource?.title ?? "")
+            .padding(.top, 10)
+        }
     }
 
     private var songInfoAndSlider: some View {
         GeometryReader { geo in
             VStack(alignment: .leading, spacing: 4) {
                 songInfo(width: geo.size.width)
-                musicSlider
+                if otherSource == nil {
+                    musicSlider
+                }
             }
         }
         .padding(.top, 10)
         .padding(.leading, 5)
     }
 
+    /// The tab shown instead of the browser's Now Playing, if any
+    private var otherSource: AudioSource? {
+        musicManager.isShowingOtherSource ? musicManager.currentAudioSource : nil
+    }
+
     private func songInfo(width: CGFloat) -> some View {
         VStack(alignment: .leading, spacing: 0) {
             MarqueeText(
-                $musicManager.songTitle, font: .headline, nsFont: .headline, textColor: .white,
+                otherSource.map { .constant($0.displayTitle) } ?? $musicManager.songTitle,
+                font: .headline, nsFont: .headline, textColor: .white,
                 frameWidth: width)
             MarqueeText(
-                $musicManager.artistName,
+                otherSource.map { .constant($0.host) } ?? $musicManager.artistName,
                 font: .headline,
                 nsFont: .headline,
                 textColor: Defaults[.playerColorTinting]
@@ -249,7 +300,7 @@ struct MusicControlsView: View {
                 MusicManager.shared.previousTrack()
             }
         case .playPause:
-            HoverButton(icon: musicManager.isPlaying ? "pause.fill" : "play.fill", scale: .large) {
+            HoverButton(icon: musicManager.displayIsPlaying ? "pause.fill" : "play.fill", scale: .large) {
                 MusicManager.shared.togglePlay()
             }
         case .next:
