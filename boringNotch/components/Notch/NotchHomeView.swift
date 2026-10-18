@@ -36,6 +36,11 @@ struct AlbumArtView: View {
             }
             albumArtButton
         }
+        // Swipe over the artwork to switch between browser tabs playing audio
+        .horizontalSwipe { direction in
+            guard musicManager.audioSources.count > 1 else { return }
+            musicManager.switchAudioSource(by: direction == .left ? 1 : -1)
+        }
     }
 
     private var albumArtBackground: some View {
@@ -139,10 +144,6 @@ struct MusicControlsView: View {
         .onAppear { musicManager.refreshAudioSources() }
         .onReceive(Timer.publish(every: 3, on: .main, in: .common).autoconnect()) { _ in
             musicManager.refreshAudioSources()
-        }
-        .horizontalSwipe { direction in
-            guard musicManager.audioSources.count > 1 else { return }
-            musicManager.switchAudioSource(by: direction == .left ? 1 : -1)
         }
     }
 

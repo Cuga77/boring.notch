@@ -57,8 +57,15 @@ class MusicManager: ObservableObject {
     @Published var audioSources: [AudioSource] = []
     /// Title of the tab picked with the arrows in the island
     @Published var selectedAudioSource: String? = nil
-    /// Tabs paused from the island, kept in the list although their sound indicator is gone
-    @Published private var pausedAudioSources: [String: Date] = [:]
+    /// Tabs that played audio, kept in the list while open although their sound indicator is gone
+    @Published private var knownAudioSources: Set<String> = []
+    /// Play state set from the island, trusted until the tab's sound indicator catches up
+    @Published private var playbackOverrides: [String: PlaybackOverride] = [:]
+
+    private struct PlaybackOverride {
+        let playing: Bool
+        let date = Date()
+    }
 
     private var artworkData: Data? = nil
 
@@ -634,9 +641,8 @@ class MusicManager: ObservableObject {
             toggleShownSourcePlayback(source, bundleID: bundleID)
             return
         }
-        // Keep the shown tab listed while paused, as its sound indicator disappears
         if let source = currentAudioSource {
-            pausedAudioSources[source.title] = isPlaying ? Date() : nil
+            playbackOverrides[source.title] = PlaybackOverride(playing: !isPlaying)
         }
         Task {
             await activeController?.togglePlay()
@@ -708,15 +714,17 @@ class MusicManager: ObservableObject {
 
     // MARK: - Browser audio sources
 
-    /// The tab the island follows: the one picked with the arrows, otherwise YouTube when several tabs play
+    /// The tab the island follows: the one picked with the arrows or a swipe, otherwise YouTube when several
+    /// tabs play, otherwise the one the browser reports as Now Playing
     var currentAudioSource: AudioSource? {
         if let selected = selectedAudioSource, let source = audioSources.first(where: { $0.title == selected }) {
             return source
         }
-        if audioSources.count > 1 {
-            return audioSources.first
+        let playing = audioSources.filter(sourceIsPlaying)
+        if playing.count > 1 {
+            return playing.first
         }
-        return audioSources.first { matchesNowPlaying($0) }
+        return audioSources.first { matchesNowPlaying($0) } ?? playing.first
     }
 
     /// True when the island shows a tab other than the one the browser reports as Now Playing
@@ -726,11 +734,18 @@ class MusicManager: ObservableObject {
 
     var displayIsPlaying: Bool {
         guard isShowingOtherSource, let source = currentAudioSource else { return isPlaying }
-        return pausedAudioSources[source.title] == nil
+        return sourceIsPlaying(source)
     }
 
     var audioSourceIndex: Int? {
         currentAudioSource.flatMap { current in audioSources.firstIndex { $0.title == current.title } }
+    }
+
+    private func sourceIsPlaying(_ source: AudioSource) -> Bool {
+        if let override = playbackOverrides[source.title], Date().timeIntervalSince(override.date) < 5 {
+            return override.playing
+        }
+        return source.isPlaying
     }
 
     private func matchesNowPlaying(_ source: AudioSource) -> Bool {
@@ -742,15 +757,24 @@ class MusicManager: ObservableObject {
         Task {
             guard await XPCHelperClient.shared.isAccessibilityAuthorized() else { return }
             let json = await XPCHelperClient.shared.listAudioTabs(bundleIdentifier: bundleID)
-            let items = (try? JSONSerialization.jsonObject(with: json) as? [[String: String]]) ?? []
+            let object = (try? JSONSerialization.jsonObject(with: json) as? [String: Any]) ?? [:]
+            let items = object["sources"] as? [[String: String]] ?? []
+            let openTabs = Set(object["openTabs"] as? [String] ?? [])
             await MainActor.run {
                 var sources = items.map {
-                    AudioSource(title: $0["title"] ?? "", host: $0["host"] ?? "", icon: Self.image(fromDataURL: $0["icon"] ?? ""))
+                    AudioSource(title: $0["title"] ?? "", host: $0["host"] ?? "",
+                                icon: Self.image(fromDataURL: $0["icon"] ?? ""), isPlaying: $0["playing"] == "1")
                 }
-                let playing = Set(sources.map(\.title))
-                // A tab that plays again was resumed elsewhere; give a fresh pause time to lose its sound indicator
-                self.pausedAudioSources = self.pausedAudioSources.filter { !playing.contains($0.key) || Date().timeIntervalSince($0.value) < 5 }
-                sources += self.audioSources.filter { self.pausedAudioSources[$0.title] != nil && !playing.contains($0.title) }
+                self.knownAudioSources.formUnion(sources.filter(\.isPlaying).map(\.title))
+                // A closed tab, or one showing another page, has no tab with that title any more
+                if !openTabs.isEmpty {
+                    self.knownAudioSources.formIntersection(openTabs)
+                }
+                let listed = Set(sources.map(\.title))
+                sources += self.audioSources
+                    .filter { self.knownAudioSources.contains($0.title) && !listed.contains($0.title) }
+                    .map { AudioSource(title: $0.title, host: $0.host, icon: $0.icon, isPlaying: false) }
+                self.playbackOverrides = self.playbackOverrides.filter { Date().timeIntervalSince($0.value.date) < 5 }
 
                 let isYouTube: (AudioSource) -> Bool = { $0.host.contains("youtube") || $0.title.localizedCaseInsensitiveContains("youtube") }
                 sources = sources.filter(isYouTube) + sources.filter { !isYouTube($0) }
@@ -771,15 +795,19 @@ class MusicManager: ObservableObject {
         selectedAudioSource = audioSources[((current + offset) % count + count) % count].title
     }
 
-    /// Pauses or resumes the tab shown in the island through its page player
+    /// Pauses or resumes the tab shown in the island through its page player; without a usable player
+    /// button the tab is opened instead, to press play there
     private func toggleShownSourcePlayback(_ source: AudioSource, bundleID: String) {
         Task {
             let result = await XPCHelperClient.shared.toggleBrowserTabPlayback(bundleIdentifier: bundleID, title: source.title)
+            if result == -1 {
+                _ = await XPCHelperClient.shared.activateBrowserTab(bundleIdentifier: bundleID, title: source.title)
+            }
             await MainActor.run {
-                if result == 1 {
-                    self.pausedAudioSources[source.title] = Date()
-                } else if result == 0 {
-                    self.pausedAudioSources[source.title] = nil
+                if result == -1 {
+                    self.launchApp(bundleID: bundleID)
+                } else {
+                    self.playbackOverrides[source.title] = PlaybackOverride(playing: result == 0)
                 }
             }
         }
@@ -851,14 +879,17 @@ class MusicManager: ObservableObject {
     }
 }
 
-/// A browser tab that plays audio
+/// A browser tab that plays audio or belongs to a video/music site
 struct AudioSource: Equatable {
     let title: String
     let host: String
     let icon: NSImage?
+    /// The tab shows a sound indicator
+    let isPlaying: Bool
 
     static func == (lhs: AudioSource, rhs: AudioSource) -> Bool {
         lhs.title == rhs.title && lhs.host == rhs.host && (lhs.icon == nil) == (rhs.icon == nil)
+            && lhs.isPlaying == rhs.isPlaying
     }
 
     /// Tab title without notification counters and the site name ("(3) Video - YouTube" → "Video")

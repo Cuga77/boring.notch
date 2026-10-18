@@ -172,9 +172,10 @@ class BoringNotchXPCHelper: NSObject, BoringNotchXPCHelperProtocol {
         reply(true)
     }
 
-    /// The page's player pause button, recognised by its label (players label it "Pause", "Пауза (k)" etc.)
-    private func findPauseButton(in window: AXUIElement) -> AXUIElement? {
-        let labels = ["пауза", "pause", "приостановить"]
+    /// The page player's pause button, recognised by its label ("Pause", "Пауза (k)"...), or its play button.
+    /// Pages list many "Play" buttons (thumbnails, tracks), so play only counts with the player's "k" shortcut.
+    private func findPlayerButton(in window: AXUIElement, pause: Bool) -> AXUIElement? {
+        let labels = pause ? ["пауза", "pause", "приостановить"] : ["смотреть", "воспроизвести", "воспроизведение", "play"]
         var visited = 0
         func search(_ element: AXUIElement, depth: Int, inPage: Bool) -> AXUIElement? {
             guard depth < 40, visited < 8000 else { return nil }
@@ -183,7 +184,8 @@ class BoringNotchXPCHelper: NSObject, BoringNotchXPCHelperProtocol {
             let page = inPage || role == "AXWebArea"
             if page, role == kAXButtonRole as String {
                 let label = (axString(element, kAXDescriptionAttribute) ?? axString(element, kAXTitleAttribute) ?? "").lowercased()
-                if labels.contains(where: { label.hasPrefix($0) }) {
+                let isPlayerKey = axString(element, "AXKeyShortcutsValue") == "k" || label.contains("(k)")
+                if labels.contains(where: { label.hasPrefix($0) }), pause || isPlayerKey {
                     return element
                 }
             }
@@ -197,33 +199,48 @@ class BoringNotchXPCHelper: NSObject, BoringNotchXPCHelperProtocol {
         return search(window, depth: 0, inPage: false)
     }
 
-    /// Tabs that show a sound indicator, in tab order, as JSON `[{"title", "host", "icon"}]`;
+    /// Tabs that play audio or belong to a video/music site, in tab order, as JSON
+    /// `{"sources": [{"title", "host", "icon", "playing"}], "openTabs": [title]}`;
     /// `icon` is the tab's favicon data URL when the browser's session file provides it.
     @objc func listAudioTabs(_ bundleIdentifier: String, with reply: @escaping (Data) -> Void) {
         guard let axApp = browserElement(for: bundleIdentifier) else {
-            reply(Data("[]".utf8))
+            reply(Data("{}".utf8))
             return
         }
-        let audioTabs = browserTabs(axApp).flatMap { $0.tabs }.filter { $0.hasAudio }
+        let allTabs = browserTabs(axApp).flatMap { $0.tabs }
         let session = bundleIdentifier == "org.mozilla.firefox" ? firefoxSessionTabs() : []
 
-        let result: [[String: String]] = audioTabs.map { tab in
+        let sources: [[String: String]] = allTabs.compactMap { tab in
             let label = tab.label.lowercased()
             let entry = session.max { matchScore(needle: $0.title.lowercased(), label: label) < matchScore(needle: $1.title.lowercased(), label: label) }
             let matched = entry.flatMap { matchScore(needle: $0.title.lowercased(), label: label) >= 0.8 ? $0 : nil }
+            let host = matched.flatMap { URL(string: $0.url)?.host } ?? ""
+            // Paused or not yet started players only show up through their site
+            guard tab.hasAudio || isMediaSite(host) else { return nil }
             return [
                 "title": tab.label,
-                "host": matched.flatMap { URL(string: $0.url)?.host } ?? "",
+                "host": host,
                 "icon": matched?.icon ?? "",
+                "playing": tab.hasAudio ? "1" : "0",
             ]
         }
-        reply((try? JSONSerialization.data(withJSONObject: result)) ?? Data("[]".utf8))
+        let result: [String: Any] = ["sources": sources, "openTabs": allTabs.map(\.label)]
+        reply((try? JSONSerialization.data(withJSONObject: result)) ?? Data("{}".utf8))
+    }
+
+    private func isMediaSite(_ host: String) -> Bool {
+        let sites = [
+            "youtube.com", "youtu.be", "rutube.ru", "music.yandex.ru", "music.yandex.com", "kinopoisk.ru",
+            "vkvideo.ru", "ivi.ru", "okko.tv", "start.ru", "wink.ru", "premier.one", "twitch.tv", "soundcloud.com",
+            "open.spotify.com", "music.apple.com", "netflix.com", "primevideo.com", "disneyplus.com", "vimeo.com",
+        ]
+        return sites.contains { host == $0 || host.hasSuffix("." + $0) }
     }
 
     /// Pause buttons pressed per tab, pressed again to resume (they turn into "Play" once pressed)
     private var pausedPlayerButtons: [String: AXUIElement] = [:]
 
-    /// Pauses or resumes the player in the matching tab: 1 paused, 0 resumed, -1 no player found.
+    /// Pauses or resumes the player in the matching tab: 1 paused, 0 resumed, -1 no player button found.
     @objc func toggleBrowserTabPlayback(_ bundleIdentifier: String, matching title: String, with reply: @escaping (Int) -> Void) {
         activateBrowserTab(bundleIdentifier, matching: title, raise: false) { [self] selected in
             guard selected, let axApp = browserElement(for: bundleIdentifier) else {
@@ -238,10 +255,15 @@ class BoringNotchXPCHelper: NSObject, BoringNotchXPCHelperProtocol {
             // The page of a just-selected tab needs a moment to appear in the tree
             for _ in 0..<6 {
                 for window in axElements(axApp, kAXWindowsAttribute) {
-                    if let button = findPauseButton(in: window) {
+                    if let button = findPlayerButton(in: window, pause: true) {
                         AXUIElementPerformAction(button, kAXPressAction as CFString)
                         pausedPlayerButtons[title] = button
                         reply(1)
+                        return
+                    }
+                    if let button = findPlayerButton(in: window, pause: false) {
+                        AXUIElementPerformAction(button, kAXPressAction as CFString)
+                        reply(0)
                         return
                     }
                 }

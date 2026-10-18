@@ -259,7 +259,7 @@ final class XPCHelperClient: NSObject {
         }
     }
 
-    /// Browser tabs playing audio as JSON `[{"title", "host", "icon"}]`
+    /// Browser tabs playing audio as JSON `{"sources": [{"title", "host", "icon"}], "openTabs": [title]}`
     nonisolated func listAudioTabs(bundleIdentifier: String) async -> Data {
         do {
             let service = await MainActor.run {
@@ -271,7 +271,7 @@ final class XPCHelperClient: NSObject {
                 }
             }
         } catch {
-            return Data("[]".utf8)
+            return Data("{}".utf8)
         }
     }
 
